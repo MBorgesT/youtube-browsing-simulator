@@ -1,13 +1,16 @@
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 from bs4 import BeautifulSoup
 from tinydb import TinyDB
 import pickle
+import random
 import time
 import os
 
-BS_DELAY = 6
+BS_DELAY = 3
 LOAD_DELAY = 6
+
+RECOMMENDED_VIDEOS_LIMIT = 12
+MAX_VIEW_TIME = BS_DELAY
 
 
 def get_seconds_from_timestamp(text):
@@ -18,7 +21,7 @@ def get_seconds_from_timestamp(text):
 	return total_seconds
 
 
-def get_frontpage_view_count(text):
+def get_view_count(text):
 	views_txt = text.split()[0]
 	metric = views_txt[-1]
 	if metric.isdigit():
@@ -64,23 +67,73 @@ class VideoWatcher:
 		for cookie in cookies:
 			self.driver.add_cookie(cookie)
 
-	def save_data(self, watched, recommended):
+	def save_data(self, watched, recommended, frontpage):
 		recommended_dict = dict()
-		for video in recommended:
-			recommended_dict.update({'title': video.title, 'channel': video.channel, 'view_amount': video.view_amount, 'url': video.url})
+		frontpage_dict = dict()
+
+		for i in range(len(recommended)):
+			recommended_dict.update({i: recommended[i].to_dict()})
+
+		for i in range(len(frontpage)):
+			frontpage_dict.update({i: frontpage[i].to_dict()})
 
 		self.db.insert({
-			'watched': {
-				'title': watched.title,
-				'channel': watched.channel,
-				'view_amount': watched.view_amount,
-				'url': watched.url
-			},
-			'recommended': recommended_dict
+			'watched': watched.to_dict(),
+			'recommended': recommended_dict,
+			'frontpage': frontpage_dict
 		})
 
+	def get_frontpage_videos(self):
+		self.driver.get('https://www.youtube.com/')
+		time.sleep(BS_DELAY)
+		bs = BeautifulSoup(self.driver.page_source, 'lxml')
+
+		recommended_videos_section = bs.find('div', id='contents')
+		recommended_videos = recommended_videos_section.find_all('ytd-rich-item-renderer')[:8]
+		frontpage_video_info = []
+		for video in recommended_videos:
+			meta = video.find('div', id='meta')
+
+			title_h3 = meta.find('h3')
+			title_link = title_h3.find('a')
+			title = title_link['title']
+			url = 'https://youtube.com' + title_link['href']
+
+			views_div = meta.find('div', {'id': 'metadata-line', 'class': 'style-scope ytd-video-meta-block'})
+			view_amount_txt = views_div.find('span').text
+			view_amount = get_view_count(view_amount_txt)
+
+			channel = meta.find('a', {'class': 'yt-simple-endpoint style-scope yt-formatted-string', 'spellcheck': 'false'}).text
+
+			frontpage_video_info.append(Video(title, channel, view_amount, url))
+
+		return frontpage_video_info
+
+	def get_recommended_videos(self):
+		bs = BeautifulSoup(self.driver.page_source, 'lxml')
+
+		recommended_section = bs.find('div', {'id': 'items', 'class': 'style-scope ytd-watch-next-secondary-results-renderer'})
+		video_sections = recommended_section.find_all('ytd-compact-video-renderer')[:RECOMMENDED_VIDEOS_LIMIT]
+
+		videos = []
+		for section in video_sections:
+			title = section.find('h3', {'class': 'style-scope ytd-compact-video-renderer'}).find('span').text
+
+			channel = section.find('yt-formatted-string', {'class': 'style-scope ytd-channel-name'}).text
+
+			views_block = section.find('div', {'id': 'metadata-line', 'class': 'style-scope ytd-video-meta-block'})
+			views_txt = views_block.find('span', {'class': 'style-scope ytd-video-meta-block'}).text
+			views = get_view_count(views_txt)
+
+			url = section.find('a', {'id': 'thumbnail', 'class': 'yt-simple-endpoint inline-block style-scope ytd-thumbnail'})['href']
+			url = 'https://www.youtube.com' + url
+
+			videos.append(Video(title, channel, views, url))
+
+		return videos
+
 	def run(self):
-		input()
+		input('Close the AdBlock page and press ENTER')
 		old_word_set = []
 		use_old_word_set = False
 
@@ -108,38 +161,22 @@ class VideoWatcher:
 
 			res1 = bs.find('div', {'class': 'style-scope ytd-video-primary-info-renderer'})
 			res2 = res1.find('span')
-			video_view_count = res2.text
+			words = res2.text.split()
+			video_view_count = int(words[0].replace(',', ''))
 
 			video_duration_txt = bs.find('span', {'class': 'ytp-time-duration'}).text
 			video_duration = get_seconds_from_timestamp(video_duration_txt)
 
 			watched_video = Video(video_title, video_channel_name, video_view_count, next_video_url)
 
-			time.sleep(min(video_duration, 10 * 60) - BS_DELAY)
+			time.sleep(min(video_duration, MAX_VIEW_TIME) - BS_DELAY)
 
-			self.driver.get('https://www.youtube.com/')
-			time.sleep(BS_DELAY)
-			bs = BeautifulSoup(self.driver.page_source, 'lxml')
+			recommended_videos = self.get_recommended_videos()
+			frontpage_videos = self.get_frontpage_videos()
 
-			recommended_videos_section = bs.find('div', id='contents')
-			recommended_videos = recommended_videos_section.find_all('ytd-rich-item-renderer')[:8]
-			frontpage_video_info = []
-			for video in recommended_videos:
-				meta = video.find('div', id='meta')
+			next_video_url = random.choice(recommended_videos).url
 
-				title_h3 = meta.find('h3')
-				title_link = title_h3.find('a')
-				title = title_link['title']
-				url = 'https://youtube.com' + title_link['href']
-
-				views_div = meta.find('div', {'id': 'metadata-line', 'class': 'style-scope ytd-video-meta-block'})
-				view_amount_txt = views_div.find('span').text
-				view_amount = get_frontpage_view_count(view_amount_txt)
-
-				channel = meta.find('a', {'class': 'yt-simple-endpoint style-scope yt-formatted-string', 'spellcheck': 'false'}).text
-
-				frontpage_video_info.append(Video(title, channel, view_amount, url))
-
+			'''
 			video_title_words = []
 			channel_name_param = ''
 			if use_old_word_set:
@@ -151,8 +188,8 @@ class VideoWatcher:
 
 			flag = True
 			count = 0
-			while flag and count < len(frontpage_video_info):
-				r_video = frontpage_video_info[count]
+			while flag and count < len(adjacent_videos):
+				r_video = adjacent_videos[count]
 				for word in r_video.title:
 					if word in video_title_words or r_video.channel == channel_name_param:
 						next_video_url = r_video.url
@@ -163,10 +200,11 @@ class VideoWatcher:
 			if flag:
 				old_word_set = video_title_words
 				old_channel_name = watched_video.channel
-				next_video_url = frontpage_video_info[0].url
+				next_video_url = adjacent_videos[0].url
 			use_old_word_set = flag
+			'''
 
-			self.save_data(watched_video, frontpage_video_info)
+			self.save_data(watched_video, recommended_videos, frontpage_videos)
 
 
 class Video:
@@ -176,3 +214,6 @@ class Video:
 		self.channel = channel
 		self.view_amount = view_amount
 		self.url = url
+
+	def to_dict(self):
+		return {'title': self.title, 'channel': self.channel, 'view_amount': self.view_amount, 'url': self.url}
