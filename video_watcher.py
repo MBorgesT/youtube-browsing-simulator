@@ -115,7 +115,7 @@ class VideoWatcher:
 
 			watched_video = Video(video_title, video_channel_name, video_view_count, next_video_url)
 
-			time.sleep(video_duration - BS_DELAY)
+			time.sleep(min(video_duration, 10 * 60) - BS_DELAY)
 
 			self.driver.get('https://www.youtube.com/')
 			time.sleep(BS_DELAY)
