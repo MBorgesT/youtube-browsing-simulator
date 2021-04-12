@@ -10,7 +10,7 @@ BS_DELAY = 3
 LOAD_DELAY = 6
 
 RECOMMENDED_VIDEOS_LIMIT = 12
-MAX_VIEW_TIME = BS_DELAY
+MAX_VIEW_TIME = 7 * 60
 
 
 def get_seconds_from_timestamp(text):
@@ -40,16 +40,18 @@ def get_view_count(text):
 
 class VideoWatcher:
 
-	def __init__(self, first_video_url, session_name, time_limit):
+	def __init__(self, first_video_url, session_name, time_limit, video_choice_pool_size, next_video_source):
 		options = webdriver.ChromeOptions()
 		options.add_extension('./adblock.crx')
 		self.driver = webdriver.Chrome(executable_path='./chromedriver', options=options)
+		time.sleep(3)
+		self.close_adblock()
 
 		try:
 			os.makedirs(session_name)
 		except:
 			None
-		db_path = './' + session_name + '/db.json'
+		db_path = './' + session_name + '/' + 'pool' + str(video_choice_pool_size) + '-source' + str(next_video_source) + '.json'
 		file = open(db_path, 'w')
 		file.close()
 		self.db = TinyDB(db_path)
@@ -57,7 +59,16 @@ class VideoWatcher:
 		self.first_video_url = first_video_url
 		self.session_name = session_name
 		self.time_limit = time_limit
+
+		self.video_choice_pool_size = video_choice_pool_size
+		self.next_video_source = next_video_source # 0: frontpage, 1: recommended, 2: both
+
 		self.cookies = None
+
+	def close_adblock(self):
+		self.driver.switch_to.window(self.driver.window_handles[1])
+		self.driver.close()
+		self.driver.switch_to.window(self.driver.window_handles[0])
 
 	def save_cookies(self):
 		pickle.dump(self.driver.get_cookies(), open('/session_cookies/' + self.session_name + '.pkl', 'wb'))
@@ -92,20 +103,26 @@ class VideoWatcher:
 		recommended_videos = recommended_videos_section.find_all('ytd-rich-item-renderer')[:8]
 		frontpage_video_info = []
 		for video in recommended_videos:
-			meta = video.find('div', id='meta')
+			try:
+				meta = video.find('div', id='meta')
 
-			title_h3 = meta.find('h3')
-			title_link = title_h3.find('a')
-			title = title_link['title']
-			url = 'https://youtube.com' + title_link['href']
+				title_h3 = meta.find('h3')
+				title_link = title_h3.find('a')
+				title = title_link['title']
+				url = 'https://youtube.com' + title_link['href']
 
-			views_div = meta.find('div', {'id': 'metadata-line', 'class': 'style-scope ytd-video-meta-block'})
-			view_amount_txt = views_div.find('span').text
-			view_amount = get_view_count(view_amount_txt)
+				views_div = meta.find('div', {'id': 'metadata-line', 'class': 'style-scope ytd-video-meta-block'})
+				view_amount_txt = views_div.find('span').text
+				view_amount = get_view_count(view_amount_txt)
 
-			channel = meta.find('a', {'class': 'yt-simple-endpoint style-scope yt-formatted-string', 'spellcheck': 'false'}).text
+				channel = meta.find('a', {'class': 'yt-simple-endpoint style-scope yt-formatted-string', 'spellcheck': 'false'}).text
 
-			frontpage_video_info.append(Video(title, channel, view_amount, url))
+				frontpage_video_info.append(Video(title, channel, view_amount, url))
+			except:
+				'''
+					This is done because it might appear playlists and other objects in the list that don't contain the same attributes as videos. 
+					In this case, if something goes wrong, it will just ignore and don't add the video.
+				'''
 
 		return frontpage_video_info
 
@@ -133,9 +150,7 @@ class VideoWatcher:
 		return videos
 
 	def run(self):
-		input('Close the AdBlock page and press ENTER')
-		old_word_set = []
-		use_old_word_set = False
+		#input('Close the AdBlock page and press ENTER')
 
 		next_video_url = self.first_video_url
 		start = time.time()
@@ -159,10 +174,13 @@ class VideoWatcher:
 			video_title = bs.find('yt-formatted-string', {'class': 'style-scope ytd-video-primary-info-renderer'}).text
 			video_channel_name = bs.find('yt-formatted-string', {'id': 'text', 'class': 'style-scope ytd-channel-name'}).find('a').text
 
-			res1 = bs.find('div', {'class': 'style-scope ytd-video-primary-info-renderer'})
-			res2 = res1.find('span')
+			res2 = bs.find('span', {'class': 'short-view-count style-scope ytd-video-view-count-renderer'})
 			words = res2.text.split()
-			video_view_count = int(words[0].replace(',', ''))
+			video_view_count = None
+			if words[0][-1].isalpha():
+				video_view_count = get_view_count(words[0])
+			else:
+				video_view_count = int(words[0].replace(',', ''))
 
 			video_duration_txt = bs.find('span', {'class': 'ytp-time-duration'}).text
 			video_duration = get_seconds_from_timestamp(video_duration_txt)
@@ -174,35 +192,17 @@ class VideoWatcher:
 			recommended_videos = self.get_recommended_videos()
 			frontpage_videos = self.get_frontpage_videos()
 
-			next_video_url = random.choice(recommended_videos).url
-
-			'''
-			video_title_words = []
-			channel_name_param = ''
-			if use_old_word_set:
-				video_title_words = old_word_set
-				channel_name_param = old_channel_name
+			if self.next_video_source == 0:
+				next_video_url = random.choice(frontpage_videos[:self.video_choice_pool_size]).url
+			elif self.next_video_source == 1:
+				next_video_url = random.choice(recommended_videos[:self.video_choice_pool_size]).url
+			elif self.next_video_source == 2:
+				if random.randint(0, 1) == 0:
+					next_video_url = random.choice(frontpage_videos[:self.video_choice_pool_size]).url
+				else:
+					next_video_url = random.choice(recommended_videos[:self.video_choice_pool_size]).url
 			else:
-				video_title_words = watched_video.title.split()
-				channel_name_param = watched_video.channel
-
-			flag = True
-			count = 0
-			while flag and count < len(adjacent_videos):
-				r_video = adjacent_videos[count]
-				for word in r_video.title:
-					if word in video_title_words or r_video.channel == channel_name_param:
-						next_video_url = r_video.url
-						flag = False
-						break
-				count += 1
-
-			if flag:
-				old_word_set = video_title_words
-				old_channel_name = watched_video.channel
-				next_video_url = adjacent_videos[0].url
-			use_old_word_set = flag
-			'''
+				raise Exception('Wrong next_vide_source value')
 
 			self.save_data(watched_video, recommended_videos, frontpage_videos)
 
